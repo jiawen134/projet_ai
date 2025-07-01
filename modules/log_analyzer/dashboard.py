@@ -2,6 +2,18 @@
 Tableau de bord de visualisation d'analyse de logs
 Construit une interface web interactive avec Streamlit
 """
+import sys
+import os
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+# 自动加载.env文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # 如果没有安装python-dotenv，跳过
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -14,6 +26,7 @@ import time
 
 from modules.log_analyzer.parser import LogParser, LogBatchProcessor
 from modules.log_analyzer.anomaly_detector import LogAnomalyDetector
+from modules.chatbot.core import LogAnalysisChatbot
 from config.log_analyzer_config import get_config
 
 class LogAnalyzerDashboard:
@@ -24,6 +37,7 @@ class LogAnalyzerDashboard:
         self.parser = LogParser()
         self.batch_processor = LogBatchProcessor()
         self.anomaly_detector = LogAnomalyDetector()
+        self.chatbot = LogAnalysisChatbot()
         
     def run(self):
         """Exécuter le tableau de bord"""
@@ -40,11 +54,8 @@ class LogAnalyzerDashboard:
         # Barre latérale
         self._render_sidebar()
         
-        # Zone de contenu principal
-        if 'data' not in st.session_state:
-            self._render_upload_section()
-        else:
-            self._render_analysis_dashboard()
+        # Zone de contenu principal - Toujours afficher les onglets
+        self._render_main_tabs()
     
     def _render_sidebar(self):
         """Rendre la barre latérale"""
@@ -262,8 +273,26 @@ class LogAnalyzerDashboard:
                 "Seuil d'anomalies": self.config.anomaly_detection['contamination']
             })
     
+    def _render_main_tabs(self):
+        """Rendre les onglets principaux"""
+        # Créer des onglets pour séparer l'analyse et le chatbot
+        tab1, tab2 = st.tabs(["📊 Analyse des logs", "🤖 Assistant IA"])
+        
+        with tab1:
+            if 'data' not in st.session_state:
+                self._render_upload_section()
+            else:
+                self._render_analysis_tab()
+        
+        with tab2:
+            self._render_chatbot_tab()
+    
     def _render_analysis_dashboard(self):
-        """Rendre le tableau de bord d'analyse"""
+        """Rendre le tableau de bord d'analyse (méthode legacy)"""
+        self._render_analysis_tab()
+    
+    def _render_analysis_tab(self):
+        """Rendre l'onglet d'analyse"""
         data = st.session_state.get('filtered_data', st.session_state.data)
         
         # Métriques de vue d'ensemble
@@ -286,6 +315,110 @@ class LogAnalyzerDashboard:
         
         # Tableau de données détaillées
         self._render_data_table(data)
+    
+    def _render_chatbot_tab(self):
+        """Rendre l'onglet chatbot"""
+        st.subheader("🤖 Assistant IA pour l'analyse de logs")
+        
+        # Vérifier la disponibilité d'OpenAI
+        llm_status = self._check_llm_status()
+        
+        if not llm_status["available"]:
+            st.error("❌ Service IA non disponible")
+            st.info("""
+            **Configuration requise pour l'assistant IA :**
+            
+            L'assistant IA nécessite une clé API OpenAI configurée.
+            Contactez l'administrateur pour configurer la clé API.
+            """)
+            return
+        
+        # Initialiser le chatbot avec le contexte des données (si disponible)
+        if 'data' in st.session_state:
+            anomaly_data = st.session_state.get('anomaly_data', None)
+            self.chatbot.set_data_context(st.session_state.data, anomaly_data)
+        else:
+            # Chatbot sans données - mode général
+            st.info("💡 **Astuce :** Chargez vos données de logs dans l'onglet 'Analyse des logs' pour obtenir des analyses spécialisées.")
+        
+        # Afficher les informations sur le modèle
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.success(f"✅ OpenAI connecté - Modèle: {llm_status['model']}")
+        
+        with col2:
+            if st.button("🗑️ Effacer conversation"):
+                self.chatbot.clear_conversation()
+                st.rerun()
+        
+        # Initialiser l'historique de chat dans la session
+        if 'chat_history' not in st.session_state:
+            st.session_state.chat_history = []
+        
+        # Afficher l'historique de conversation
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.write(message["content"])
+        
+        # Questions suggérées
+        if not st.session_state.chat_history:
+            st.markdown("### 💡 Questions suggérées:")
+            suggestions = self.chatbot.suggest_questions()
+            
+            cols = st.columns(2)
+            for i, suggestion in enumerate(suggestions[:4]):  # Afficher jusqu'à 4 suggestions
+                col = cols[i % 2]
+                if col.button(suggestion, key=f"suggestion_{i}"):
+                    self._process_chat_input(suggestion)
+                    st.rerun()
+        
+        # Zone de saisie du chat
+        if prompt := st.chat_input("Posez une question sur vos logs réseau..."):
+            self._process_chat_input(prompt)
+            st.rerun()
+    
+    def _check_llm_status(self):
+        """Vérifier le statut du service LLM"""
+        try:
+            from tools.llm_api import LLMManager
+            manager = LLMManager()
+            
+            if 'openai' in manager.get_available_providers():
+                return {
+                    "available": True,
+                    "model": "GPT-4o"
+                }
+            else:
+                return {"available": False, "model": None}
+        except Exception as e:
+            return {"available": False, "error": str(e)}
+    
+    def _process_chat_input(self, user_input: str):
+        """Traiter l'entrée de chat de l'utilisateur"""
+        # Ajouter le message utilisateur à l'historique
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": user_input
+        })
+        
+        # Traiter avec le chatbot
+        try:
+            with st.spinner("🤔 Analyse en cours..."):
+                response = self.chatbot.process_query(user_input)
+            
+            # Ajouter la réponse à l'historique
+            st.session_state.chat_history.append({
+                "role": "assistant", 
+                "content": response
+            })
+            
+        except Exception as e:
+            error_message = f"Désolé, une erreur s'est produite : {str(e)}"
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": error_message
+            })
     
     def _render_overview_metrics(self, data):
         """Rendre les métriques de vue d'ensemble"""
